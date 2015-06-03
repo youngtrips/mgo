@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/url"
@@ -243,6 +244,7 @@ func ParseURL(url string) (*DialInfo, error) {
 	setName := ""
 	poolLimit := 0
 	autoReconnect := false
+	reconnectInterval := 60
 	for k, v := range uinfo.options {
 		switch k {
 		case "authSource":
@@ -271,23 +273,29 @@ func ParseURL(url string) (*DialInfo, error) {
 				autoReconnect = true
 				break
 			}
-			fallthrough
+		case "reconnectInterval":
+			reconnectInterval, err = strconv.Atoi(v)
+			if err != nil {
+				return nil, errors.New("bad value for reconnectInterval: " + v)
+			}
+			break
 		default:
 			return nil, errors.New("unsupported connection URL option: " + k + "=" + v)
 		}
 	}
 	info := DialInfo{
-		Addrs:          uinfo.addrs,
-		Direct:         direct,
-		Database:       uinfo.db,
-		Username:       uinfo.user,
-		Password:       uinfo.pass,
-		Mechanism:      mechanism,
-		Service:        service,
-		Source:         source,
-		PoolLimit:      poolLimit,
-		ReplicaSetName: setName,
-		AutoReconnect:  autoReconnect,
+		Addrs:             uinfo.addrs,
+		Direct:            direct,
+		Database:          uinfo.db,
+		Username:          uinfo.user,
+		Password:          uinfo.pass,
+		Mechanism:         mechanism,
+		Service:           service,
+		Source:            source,
+		PoolLimit:         poolLimit,
+		ReplicaSetName:    setName,
+		AutoReconnect:     autoReconnect,
+		ReconnectInterval: reconnectInterval,
 	}
 	return &info, nil
 }
@@ -357,7 +365,9 @@ type DialInfo struct {
 	// AutoReconnect defines the session will try to reconnect to server
 	// while is has broken.
 	// Default disabled
-	AutoReconnect bool
+	// Default ReconnectInterval is 60 seconds
+	AutoReconnect     bool
+	ReconnectInterval int
 
 	// DialServer optionally specifies the dial function for establishing
 	// connections with the MongoDB servers.
@@ -440,9 +450,10 @@ func DialWithInfo(info *DialInfo) (*Session, error) {
 	session.SetMode(Strong, true)
 
 	// monitor session
+	interval := time.Duration(info.ReconnectInterval) * time.Second
 	if info.AutoReconnect {
 		go func() {
-			c := time.Tick(1 * time.Minute)
+			c := time.Tick(interval)
 			loop := true
 			for loop {
 				select {
