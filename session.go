@@ -71,6 +71,7 @@ type Session struct {
 	dialCred     *Credential
 	creds        []Credential
 	poolLimit    int
+	stopMonitor  chan bool
 }
 
 type Database struct {
@@ -241,6 +242,7 @@ func ParseURL(url string) (*DialInfo, error) {
 	source := ""
 	setName := ""
 	poolLimit := 0
+	autoReconnect := false
 	for k, v := range uinfo.options {
 		switch k {
 		case "authSource":
@@ -264,6 +266,11 @@ func ParseURL(url string) (*DialInfo, error) {
 			if v == "replicaSet" {
 				break
 			}
+		case "autoReconnect":
+			if v == "true" {
+				autoReconnect = true
+				break
+			}
 			fallthrough
 		default:
 			return nil, errors.New("unsupported connection URL option: " + k + "=" + v)
@@ -280,6 +287,7 @@ func ParseURL(url string) (*DialInfo, error) {
 		Source:         source,
 		PoolLimit:      poolLimit,
 		ReplicaSetName: setName,
+		AutoReconnect:  autoReconnect,
 	}
 	return &info, nil
 }
@@ -345,6 +353,11 @@ type DialInfo struct {
 	// PoolLimit defines the per-server socket pool limit. Defaults to 4096.
 	// See Session.SetPoolLimit for details.
 	PoolLimit int
+
+	// AutoReconnect defines the session will try to reconnect to server
+	// while is has broken.
+	// Default disabled
+	AutoReconnect bool
 
 	// DialServer optionally specifies the dial function for establishing
 	// connections with the MongoDB servers.
@@ -425,6 +438,25 @@ func DialWithInfo(info *DialInfo) (*Session, error) {
 		return nil, err
 	}
 	session.SetMode(Strong, true)
+
+	// monitor session
+	if info.AutoReconnect {
+		go func() {
+			c := time.Tick(1 * time.Minute)
+			loop := true
+			for loop {
+				select {
+				case <-c:
+					if err := session.Ping(); err != nil && err == io.EOF {
+						session.Refresh()
+					}
+				case <-session.stopMonitor:
+					loop = false
+					break
+				}
+			}
+		}()
+	}
 	return session, nil
 }
 
@@ -488,6 +520,7 @@ func newSession(consistency mode, cluster *mongoCluster, timeout time.Duration) 
 		syncTimeout: timeout,
 		sockTimeout: timeout,
 		poolLimit:   4096,
+		stopMonitor: make(chan bool, 1),
 	}
 	debugf("New session %p on cluster %p", session, cluster)
 	session.SetMode(consistency, true)
@@ -1429,6 +1462,7 @@ func (s *Session) Close() {
 		s.unsetSocket()
 		s.cluster_.Release()
 		s.cluster_ = nil
+		s.stopMonitor <- true
 	}
 	s.m.Unlock()
 }
